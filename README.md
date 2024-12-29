@@ -198,6 +198,7 @@ class UniTrainingConfig:
 ```
 Then run the training script, the code is in fact run and search various sn, results are saved to results_sngp_evaluate.csv.
 ```
+cd truecam
 bash scripts/run_sngp.sh
 ```
 
@@ -215,6 +216,7 @@ class UniLRConfig:
 ```
 Then, run the automl training
 ```angular2html
+cd truecam
 python automl_eat.py
 ```
 
@@ -230,7 +232,7 @@ bash scripts/run_eat_cp.sh
 ```
 ### 4. Train and evaluate the results (for Prov-Gigapath)
 
-Please see the bash file in **prov-gigapath/scripts_truecam** for details, for example, you can use the following code
+Please see the bash file in **truecam/prov-gigapath/scripts_truecam** for details, for example, you can use the following code
 to get the results of the Prov-Gigapath model with TRUECAM.
 ```angular2html
 exp_name="sngp"
@@ -255,8 +257,15 @@ python finetune/main.py --exp_name $exp_name --folds "$folds" --gaussian_process
         --mask_pkl_path "$mask_pkl_path"
 ```
 
-More results for TITAN or Inception-v3 will be released soon. If you have any questions, please feel free to contact me 
-(seatao.wang@connect.polyu.hk) or raise an issue.
+## Development
+
+Currently, we release the following code:
+- [✅] [Downstream Training Code of UNI, CONCH](./truecam/scripts/)
+- [✅] [Downstream Training Code of Prov-Gigapath](./prov-gigapath/scripts_truecam)
+- [✅] [Evaluation Scripts](./evaluate_everything.py)
+- [🚧] [Downstream Training Code of TITAN or Inception-v3 (Coming Soon)](./titan/scripts/)
+
+If you have any questions, please feel free to contact me (seatao.wang@connect.polyu.hk) or raise an issue.
 
 ## Acknowledgements
 The project was built on top of repositories such as [UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN),  [Conformal Prediction](https://github.com/aangelopoulos/conformal-prediction/tree/main/notebooks), [Conformal Risk Control](https://github.com/aangelopoulos/conformal-risk)
