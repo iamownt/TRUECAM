@@ -1,0 +1,8 @@
+name: nsclc
+setting: multi_class
+label_dict:
+  LUAD: 0
+  LUSC: 1
+max_tiles: 18000
+shuffle_tiles: true
+add_metrics: ['qwk']

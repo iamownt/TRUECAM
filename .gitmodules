@@ -1,0 +1,6 @@
+[submodule "CONCH"]
+	path = CONCH
+	url = https://github.com/mahmoodlab/CONCH.git
+[submodule "TITAN"]
+	path = TITAN
+	url = https://github.com/mahmoodlab/TITAN
