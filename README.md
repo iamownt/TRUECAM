@@ -1,5 +1,6 @@
 # TRUECAM 
-===========
+
+
 ## Implementing Trust in Non-Small Cell Lung Cancer Diagnosis with a Conformalized Uncertainty-Aware AI Framework in Whole-Slide Images
 
 [Preprint]() | [Cite](#reference)
@@ -262,8 +263,9 @@ python finetune/main.py --exp_name $exp_name --folds "$folds" --gaussian_process
 Currently, we release the following code:
 - [✅] [Downstream Training Code of UNI, CONCH](./truecam/scripts/)
 - [✅] [Downstream Training Code of Prov-Gigapath](./prov-gigapath/scripts_truecam)
-- [✅] [Evaluation Scripts](./evaluate_everything.py)
-- [🚧] [Downstream Training Code of TITAN or Inception-v3 (Coming Soon)](./titan/scripts/)
+- [✅] [Downstream Training Code of TITAN ](./truecam/titan_code/)
+- [✅] [Evaluation Scripts](./truecam/evaluate_everything.py)
+- [🚧] [Downstream Training Code of Inception-v3 (Coming Soon)](./titan/scripts/)
 
 If you have any questions, please feel free to contact me (seatao.wang@connect.polyu.hk) or raise an issue.
 
