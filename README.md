@@ -3,7 +3,7 @@
 
 ## Implementing Trust in Non-Small Cell Lung Cancer Diagnosis with a Conformalized Uncertainty-Aware AI Framework in Whole-Slide Images
 
-[Preprint]() | [Cite](#reference)
+[Preprint](https://www.medrxiv.org/content/10.1101/2024.12.27.24319715v1) | [Cite](#reference)
 
 **Abstract:** Ensuring trustworthiness is fundamental to the development of artificial intelligence (AI) that is considered societally responsible, particularly in cancer diagnostics, where a misdiagnosis can have dire consequences. However, current AI models for digital pathology are limited in their ability on hone to the sections of slide where there is greater chance of making a correct diagnosis. To address this issue, we developed TRUECAM, a framework designed to ensure both data and model trustworthiness in non-small cell lung cancer subtyping with whole-slide images. TRUECAM integrates 1) a spectral-normalized neural Gaussian process for identifying out-of-scope inputs and 2) an ambiguity-guided elimination of tiles to filter out highly ambiguous regions, addressing data trustworthiness, as well as 3) a conformal prediction model to ensure controlled error rates. We systematically evaluated the framework across multiple large-scale cancer datasets, leveraging both task-specific and foundation models, illustrate that an AI model wrapped with TRUECAM significantly outperforms models that lack such guidance, in terms of classification accuracy, robustness, interpretability, and data efficiency, while also achieving improvements in fairness.
 
@@ -273,8 +273,20 @@ If you have any questions, please feel free to contact me (seatao.wang@connect.p
 The project was built on top of repositories such as [UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN),  [Conformal Prediction](https://github.com/aangelopoulos/conformal-prediction/tree/main/notebooks), [Conformal Risk Control](https://github.com/aangelopoulos/conformal-risk)
 
 ## Reference
-If you find our work useful in your research or if you use parts of this code please consider citing our [paper](https://arxiv.org/abs/2411.19666):
-
+If you find our work useful in your research or if you use parts of this code please consider citing our [paper](https://www.medrxiv.org/content/10.1101/2024.12.27.24319715v1):
+````
+@article{Zhang2024.12.27.24319715,
+	author = {Zhang, Xiaoge and Wang, Tao and Yan, Chao and Najdawi, Fedaa and Zhou, Kai and Ma, Yuan and Cheung, Yiu-ming and Malin, Bradley A.},
+	title = {Implementing Trust in Non-Small Cell Lung Cancer Diagnosis with a Conformalized Uncertainty-Aware AI Framework in Whole-Slide Images},
+	elocation-id = {2024.12.27.24319715},
+	year = {2024},
+	doi = {10.1101/2024.12.27.24319715},
+	publisher = {Cold Spring Harbor Laboratory Press},
+	URL = {https://www.medrxiv.org/content/early/2024/12/30/2024.12.27.24319715},
+	eprint = {https://www.medrxiv.org/content/early/2024/12/30/2024.12.27.24319715.full.pdf},
+	journal = {medRxiv}
+}
+```
 
 
 
