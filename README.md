@@ -274,7 +274,7 @@ The project was built on top of repositories such as [UNI](https://github.com/ma
 
 ## Reference
 If you find our work useful in your research or if you use parts of this code please consider citing our [paper](https://www.medrxiv.org/content/10.1101/2024.12.27.24319715v1):
-````
+```
 @article{Zhang2024.12.27.24319715,
 	author = {Zhang, Xiaoge and Wang, Tao and Yan, Chao and Najdawi, Fedaa and Zhou, Kai and Ma, Yuan and Cheung, Yiu-ming and Malin, Bradley A.},
 	title = {Implementing Trust in Non-Small Cell Lung Cancer Diagnosis with a Conformalized Uncertainty-Aware AI Framework in Whole-Slide Images},
@@ -288,5 +288,6 @@ If you find our work useful in your research or if you use parts of this code pl
 }
 ```
 
+<img src=assets/joint_logo.jpg> 
 
 
