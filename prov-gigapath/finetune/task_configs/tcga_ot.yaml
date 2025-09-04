@@ -1,0 +1,52 @@
+name: tcga_ot
+setting: multi_class
+label_dict:
+  AASTR: 0
+  ACC: 1
+  AOAST: 2
+  ASTR: 3
+  BLCA: 4
+  CCRCC: 5
+  CESC: 6
+  CHRCC: 7
+  COAD: 8
+  DDLS: 9
+  DSTAD: 10
+  ESCA: 11
+  ESCC: 12
+  GBM: 13
+  HCC: 14
+  HGSOC: 15
+  HNSC: 16
+  IDC: 17
+  ILC: 18
+  LMS: 19
+  LUAD: 20
+  LUSC: 21
+  MACR: 22
+  MEL: 23
+  MFH: 24
+  MFS: 25
+  NSGCT: 26
+  OAST: 27
+  ODG: 28
+  PAAD: 29
+  PHC: 30
+  PLEMESO: 31
+  PRAD: 32
+  PRCC: 33
+  READ: 34
+  SEM: 35
+  SKCM: 36
+  STAD: 37
+  THFO: 38
+  THPA: 39
+  THYM: 40
+  TSTAD: 41
+  UCS: 42
+  UEC: 43
+  UM: 44
+  USC: 45
+max_tiles: 18000
+shuffle_tiles: true
+add_metrics: ['qwk']

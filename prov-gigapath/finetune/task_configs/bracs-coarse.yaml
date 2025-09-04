@@ -1,0 +1,9 @@
+name: bracs-coarse
+setting: multi_class
+label_dict:
+  0: 0
+  1: 1
+  2: 2
+max_tiles: 18000
+shuffle_tiles: true
+add_metrics: ['qwk']

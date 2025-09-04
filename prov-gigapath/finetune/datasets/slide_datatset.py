@@ -11,12 +11,11 @@ class SlideDatasetForTasks(Dataset):
     def __init__(self,
                  data_df: pd.DataFrame,
                  root_path: str,
-                 # splits: list,
-                 splits: str,
-                 task_config: dict, 
-                 # slide_key: str='slide_id',
-                 slide_key: str = 'slide_int',
+                 splits: list,
+                 task_config: dict,
+                 slide_key: str='slide_id',
                  split_key: str='pat_id',
+                 evaluate_level: str="patient_level",
                  **kwargs
                  ):
         '''
@@ -45,12 +44,15 @@ class SlideDatasetForTasks(Dataset):
         # get slides that have tile encodings
         valid_slides = self.get_valid_slides(root_path, data_df[slide_key].values)
         # filter out slides that do not have tile encodings
-        # data_df = data_df[data_df[slide_key].isin(valid_slides)]
-        if "patient" in data_df.columns and "slide_int" in data_df.columns:
-            self.slide_int_to_patient_int = dict(zip(data_df["slide_int"], data_df["patient"]))
-        else:
-            self.slide_int_to_patient_int = None
         data_df = data_df[data_df[slide_key].isin(valid_slides)]
+        if "patient" not in data_df.columns and "case_id" in data_df.columns:
+            data_df.rename(columns={'case_id': 'patient'}, inplace=True)
+        if "patient" in data_df.columns and "slide_id" in data_df.columns and evaluate_level == "patient_level":
+            self.s_to_p_mapping = dict(zip(data_df["slide_id"], data_df["patient"]))
+        else:
+            self.s_to_p_mapping = None
+        print("Evaluate level: ", evaluate_level)
+        data_df.rename(columns={'cohort': 'label'}, inplace=True)
         # set up the task
         self.setup_data(data_df, splits, task_config.get('setting', 'multi_class'))
         
@@ -62,16 +64,10 @@ class SlideDatasetForTasks(Dataset):
         '''This function is used to get the slides that have tile encodings stored in the tile directory'''
         valid_slides = []
         for i in range(len(slides)):
-            # if 'pt_files' in root_path.split('/')[-1]:
-            #     sld = slides[i].replace(".svs", "") + '.pt'
-            if isinstance(slides[i], str):
-                if 'pt_files' in root_path.split('/')[-1]:
-                    sld = slides[i].replace(".svs", "") + '.pt'
-                else:
-                    sld = slides[i].replace(".svs", "") + '.h5'
+            if 'pt_files' in root_path.split('/')[-1]:
+                sld = slides[i].replace(".svs", "") + '.pt'
             else:
-                # sld = slides[i].replace(".svs", "") + '.h5'
-                sld = str(slides[i]) + ".h5"
+                sld = slides[i].replace(".svs", "") + '.h5'
             sld_path = os.path.join(root_path, sld)
             if not os.path.exists(sld_path):
                 print('Missing: ', sld_path)
@@ -90,21 +86,24 @@ class SlideDatasetForTasks(Dataset):
             raise ValueError('Invalid task: {}'.format(task))
         self.slide_data, self.images, self.labels, self.n_classes = prepare_data_func(df, splits)
     
-    def prepare_multi_class_or_binary_data(self, df: pd.DataFrame, splits: str):
+    def prepare_multi_class_or_binary_data(self, df: pd.DataFrame, splits: list):
         '''Prepare the data for multi-class classification'''
         # set up the label_dict
-        df.rename(columns={'cohort': 'label'}, inplace=True)
         label_dict = self.task_cfg.get('label_dict', {})
         assert  label_dict, 'No label_dict found in the task configuration'
         # set up the mappings
         assert 'label' in df.columns, 'No label column found in the dataframe'
-        df['label'] = df['label'].map(label_dict)
+        if df['label'].dtype == 'object':
+            df['label'] = df['label'].map(label_dict)
+
         n_classes = len(label_dict)
-        
+        unique_labels = len(df['label'].unique())
+        # assert n_classes == unique_labels, f'Mismatch: label_dict has {n_classes} classes but data has {unique_labels} unique labels'
+
         # get the corresponding splits
-        assert self.split_key in df.columns, 'No {} column found in the dataframe'.format(self.split_key)
-        # df = df[df[self.split_key].isin(splits)]
-        df = df[df[self.split_key] == splits]
+        if self.split_key is not None:
+            assert self.split_key in df.columns, 'No {} column found in the dataframe'.format(self.split_key)
+            df = df[df[self.split_key].isin(splits)]
         images = df[self.slide_key].to_list()
         labels = df[['label']].to_numpy().astype(int)
         
@@ -134,12 +133,11 @@ class SlideDataset(SlideDatasetForTasks):
     def __init__(self,
                  data_df: pd.DataFrame,
                  root_path: str,
-                 # splits: list,
-                 splits: str,
+                 splits: list,
                  task_config: dict,
-                 # slide_key='slide_id',
+                 slide_key='slide_id',
                  split_key='pat_id',
-                 slide_key='slide_int',
+                 evaluate_level="slide_level",
                  mask_dict=None,
                  **kwargs
                  ):
@@ -161,7 +159,7 @@ class SlideDataset(SlideDatasetForTasks):
         split_key: str
             The key that specifies the column for splitting the data
         '''
-        super(SlideDataset, self).__init__(data_df, root_path, splits, task_config, slide_key, split_key, **kwargs)
+        super(SlideDataset, self).__init__(data_df, root_path, splits, task_config, slide_key, split_key, evaluate_level, **kwargs)
         self.mask_dict = mask_dict
 
     def shuffle_data(self, images: torch.Tensor, coords: torch.Tensor) -> tuple:
@@ -176,11 +174,15 @@ class SlideDataset(SlideDatasetForTasks):
         assets = {}
         attrs = {}
         h5_path = Path(h5_path)
+        slide_id = h5_path.stem
         with h5py.File(h5_path, 'r') as f:
             if self.mask_dict is not None:
-                in_slide_threshold = np.quantile(self.mask_dict["mask_pkl"][h5_path.stem], self.mask_dict["mask_tile_threshold"])
-                mask_bool = self.mask_dict["mask_pkl"][h5_path.stem] <= in_slide_threshold
+                epsilon = 1e-7  # Small value to prevent log(0)
+                probabilities = np.clip(self.mask_dict[slide_id]["probabilities"], epsilon, 1.0).astype(np.float32)
+                self.mask_dict[slide_id]["ambiguity"] = -np.sum(probabilities * np.log(probabilities + 1e-8), axis=1)
 
+                in_slide_threshold = np.quantile(self.mask_dict["mask_pkl"][slide_id]["ambiguity"], self.mask_dict["mask_tile_threshold"])
+                mask_bool = self.mask_dict["mask_pkl"][slide_id]["ambiguity"] <= in_slide_threshold
             for key in f.keys():
                 if self.mask_dict is not None:
                     assets[key] = f[key][:][mask_bool]
@@ -189,7 +191,28 @@ class SlideDataset(SlideDatasetForTasks):
                 if f[key].attrs is not None:
                     attrs[key] = dict(f[key].attrs)
         return assets, attrs
-    
+
+    def read_assets_from_pt(self, pt_path: str) -> dict:
+        '''Read the assets from the pt file'''
+        assets = torch.load(pt_path)
+        pt_path = Path(pt_path)
+        if self.mask_dict is not None:
+            slide_id = pt_path.stem
+            epsilon = 1e-7  # Small value to prevent log(0)
+            probabilities = np.clip(self.mask_dict["mask_pkl"][slide_id]["probabilities"], epsilon, 1.0).astype(np.float32)
+            self.mask_dict["mask_pkl"][slide_id]["ambiguity"] = -np.sum(probabilities * np.log(probabilities + 1e-8), axis=1)
+
+            in_slide_threshold = np.quantile(self.mask_dict["mask_pkl"][slide_id]["ambiguity"],
+                                             self.mask_dict["mask_tile_threshold"])
+            mask_bool = self.mask_dict["mask_pkl"][slide_id]["ambiguity"] <= in_slide_threshold
+            # print("mask", len(mask_bool), mask_bool.sum())
+        for key in assets.keys():
+            if self.mask_dict is not None:
+                assets[key] = assets[key][mask_bool]
+            else:
+                assets[key] = assets[key]
+        return assets, {}
+
     def get_sld_name_from_path(self, sld: str) -> str:
         '''Get the slide name from the slide path'''
         sld_name = os.path.basename(sld).split('.h5')[0]
@@ -198,24 +221,23 @@ class SlideDataset(SlideDatasetForTasks):
     def get_images_from_path(self, img_path: str) -> dict:
         '''Get the images from the path'''
         if '.pt' in img_path:
-            images = torch.load(img_path)
-            coords = 0
+            assets, _ = self.read_assets_from_pt(img_path)
+            images = assets['features']
+            coords = assets['coords']
         elif '.h5' in img_path:
             assets, _ = self.read_assets_from_h5(img_path)
-            # images = torch.from_numpy(assets['features'])
             images = torch.from_numpy(assets['tile_embeds'])
             coords = torch.from_numpy(assets['coords'])
 
-            # if shuffle the data
-            if self.shuffle_tiles:
-                images, coords = self.shuffle_data(images, coords)
+        if self.shuffle_tiles:
+            images, coords = self.shuffle_data(images, coords)
 
-            if images.size(0) > self.max_tiles:
-                images = images[:self.max_tiles, :]
-            if coords.size(0) > self.max_tiles:
-                coords = coords[:self.max_tiles, :]
-        
+        if images.size(0) > self.max_tiles:
+            images = images[:self.max_tiles, :]
+        if coords.size(0) > self.max_tiles:
+            coords = coords[:self.max_tiles, :]
         # set the input dict
+
         data_dict = {'imgs': images,
                 'img_lens': images.size(0),
                 'pad_mask': 0,
@@ -241,7 +263,7 @@ class SlideDataset(SlideDatasetForTasks):
                   'img_lens': data_dict['img_lens'],
                   'pad_mask': data_dict['pad_mask'],
                   'coords': data_dict['coords'],
-                  'slide_id': self.images[idx] if self.slide_int_to_patient_int is None else self.slide_int_to_patient_int[self.images[idx]],
+                  'slide_id': self.images[idx] if self.s_to_p_mapping is None else self.s_to_p_mapping[self.images[idx]],
                   'labels': label}
         return sample
     

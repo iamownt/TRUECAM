@@ -17,6 +17,21 @@
 TRUECAM (**TR**ustworthiness-focused, **U**ncertainty-aware, **E**nd-to-end **CA**ncer diagnosis with **M**odel-agnostic capabilities.) is a framework that designed to simultanuously ensure data and model trustworthiness: 1) a spectral-normalized neural Gaussian process (SNGP) to establish informative data representation and uncertainty quantification, 2) an elimination of ambiguous tiles (EAT) mechanism for filtering out noisy patches from slides, and 3) conformal prediction (CP) to enable a statistically guaranteed error rate
 - _**Why use TRUECAM?**_: TRUECAM can be seamlessly deployed in conjunction with SOTA foundation models ([UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN)) that utilize pretrained visual encoders. Its flexible framework allows for the incorporation of various deep learning models to **enhance performance** on medical imaging tasks, ensuring that TRUECAM benefits from recent advancements in AI while providing robust **uncertainty quantification and interpretability**. This adaptability facilitates the integration of TRUECAM into clinical workflows, bridging the gap between traditional pathology practices and modern computational techniques, ultimately leading to more effective and reliable outcomes in cancer diagnostics.
 
+
+## 🚀 What\'s New
+
+1. **Released curated dataset split CSVs**: Added `train`, `val`, and `test` split files to facilitate reproducibility for TCGA-OT (following [TITAN](https://github.com/mahmoodlab/TITAN)), BRACS, TCGA-BRTS (brain tumor subtyping), TCGA-BRCA, TCGA-RCC. GTEx-lung metadata references are available via [the supplementary tables](https://pmc.ncbi.nlm.nih.gov/articles/PMC5011060/).  
+2. **Variational Bayesian Last Layer (VBLL) support**: Released training and evaluation code for VBLL methods. Install [VBLL](https://github.com/VectorInstitute/vbll/tree/main), then see `truecam/vbll_code` for TabNet-style configuration and execution.  
+3. **Additional MIL architectures**: Integrated CLAM and TransMIL under `truecam/diverse_mil/downstream_models` and added a `train_mil` pipeline to reproduce multiple MIL baselines with foundation model features (UNI, CONCH). Updated scripts for Prov-Gigapath reproducibility. For generating required `h5` / `pt` feature containers, follow the [CLAM](https://github.com/mahmoodlab/CLAM).  
+4. **EAT verification assets**: Released ambiguity scores and proxy model probability outputs for TCGA-OT to validate the EAT mechanism. [Hugging Face dataset](https://huggingface.co/datasets/ownt/TCGA-OT-ProxyModel-Outputs).  
+5. **License update**: Project is now under the MIT License (see `LICENSE`).  
+
+### Quick Start for New Components
+
+- VBLL: `cd truecam/vbll_code` then configure YAML / args as shown in examples.  
+- MIL (CLAM / TransMIL): Use `train_mil` with precomputed foundation embeddings.  
+- EAT artifacts: Download from the Hugging Face dataset and place paths in evaluation configs.
+
 ## Install
 
 On an NVIDIA RTX4090 GPU machine, with CUDA toolkit enabled.
@@ -265,12 +280,14 @@ Currently, we release the following code:
 - [✅] [Downstream Training Code of Prov-Gigapath](./prov-gigapath/scripts_truecam)
 - [✅] [Downstream Training Code of TITAN ](./truecam/titan_code/)
 - [✅] [Evaluation Scripts](./truecam/evaluate_everything.py)
-- [🚧] [Downstream Training Code of Inception-v3 (Coming Soon)](./titan/scripts/)
 
 If you have any questions, please feel free to contact me (seatao.wang@connect.polyu.hk) or raise an issue.
 
 ## Acknowledgements
-The project was built on top of repositories such as [UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN),  [Conformal Prediction](https://github.com/aangelopoulos/conformal-prediction/tree/main/notebooks), [Conformal Risk Control](https://github.com/aangelopoulos/conformal-risk)
+The project was built on top of repositories such as [UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN),  [Conformal Prediction](https://github.com/aangelopoulos/conformal-prediction/tree/main/notebooks), [Conformal Risk Control](https://github.com/aangelopoulos/conformal-risk), [TransMIL](https://github.com/szc19990412/TransMIL), [CLAM](https://github.com/mahmoodlab/CLAM). Thanks for their great work!
+
+## License
+This code is made available under the MIL License. 
 
 ## Reference
 If you find our work useful in your research or if you use parts of this code please consider citing our [paper](https://www.medrxiv.org/content/10.1101/2024.12.27.24319715v1):

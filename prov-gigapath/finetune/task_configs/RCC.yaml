@@ -1,0 +1,9 @@
+name: RCC
+setting: multi_class
+label_dict:
+  CCRCC: 0
+  PRCC: 1
+  CHRCC: 2
+max_tiles: 18000
+shuffle_tiles: true
+add_metrics: ['qwk']

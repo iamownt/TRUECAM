@@ -1,0 +1,8 @@
+name: BRCA
+setting: multi_class
+label_dict:
+  IDC: 0
+  ILC: 1
+max_tiles: 18000
+shuffle_tiles: true
+add_metrics: ['qwk']
