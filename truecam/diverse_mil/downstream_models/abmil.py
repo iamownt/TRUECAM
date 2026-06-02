@@ -42,35 +42,9 @@ class GatedAttention(nn.Module):
         return (prob * x).sum(dim=1)
 
 
-# class GatedABMIL(nn.Module):
-#     def __init__(self, embed_dim: int = 1024, hdim1: int = 512, hdim2: int = 384, n_classes: int = 2):
-#         super(GatedABMIL, self).__init__()
-#         self.feature_extractor = nn.Sequential(nn.Linear(embed_dim, hdim1), nn.ReLU(), nn.Dropout(0.1))
-#         self.attention_layer = GatedAttention(hdim1, hdim2, dropout_input=0.25, dropout_hidden=0.25)
-#         self.classifier = nn.Linear(hdim1, n_classes)
-#
-#     @property
-#     def device(self):
-#         return next(self.parameters()).device
-#
-#     def forward(self, x, **kwargs):
-#         x = self.feature_extractor(x)
-#         x = self.attention_layer(x)
-#         return self.classifier(x, **kwargs)
-
 class GatedABMIL(nn.Module):
-    """https://github.com/mahmoodlab/CLAM/models/model_clam.py
-       The only differences is that we use single mapping to enable uni and conch with the same hidden state for attention
-    """
-
     def __init__(self, embed_dim: int = 1024, hdim1: int = 512, hdim2: int = 384, n_classes: int = 2):
         super(GatedABMIL, self).__init__()
-        # if embed_dim == 512:
-        #     self.fair_proj = nn.Linear(embed_dim, 1024)
-        #     print("use fair projection")
-        #     embed_dim = 1024
-        # else:
-        #     self.fair_proj = nn.Identity()
         self.feature_extractor = nn.Sequential(nn.Linear(embed_dim, hdim1), nn.ReLU(), nn.Dropout(0.1))
         self.attention_layer = GatedAttention(hdim1, hdim2, dropout_input=0.25, dropout_hidden=0.25)
         self.classifier = nn.Linear(hdim1, n_classes)
@@ -80,10 +54,36 @@ class GatedABMIL(nn.Module):
         return next(self.parameters()).device
 
     def forward(self, x, **kwargs):
-        # x = self.fair_proj(x)
         x = self.feature_extractor(x)
         x = self.attention_layer(x)
         return self.classifier(x, **kwargs)
+
+# class GatedABMIL(nn.Module):
+#     """https://github.com/mahmoodlab/CLAM/models/model_clam.py
+#        The only differences is that we use single mapping to enable uni and conch with the same hidden state for attention
+#     """
+#
+#     def __init__(self, embed_dim: int = 1024, hdim1: int = 512, hdim2: int = 384, n_classes: int = 2):
+#         super(GatedABMIL, self).__init__()
+#         # if embed_dim == 512:
+#         #     self.fair_proj = nn.Linear(embed_dim, 1024)
+#         #     print("use fair projection")
+#         #     embed_dim = 1024
+#         # else:
+#         #     self.fair_proj = nn.Identity()
+#         self.feature_extractor = nn.Sequential(nn.Linear(embed_dim, hdim1), nn.ReLU(), nn.Dropout(0.1))
+#         self.attention_layer = GatedAttention(hdim1, hdim2, dropout_input=0.25, dropout_hidden=0.25)
+#         self.classifier = nn.Linear(hdim1, n_classes)
+#
+#     @property
+#     def device(self):
+#         return next(self.parameters()).device
+#
+#     def forward(self, x, **kwargs):
+#         # x = self.fair_proj(x)
+#         x = self.feature_extractor(x)
+#         x = self.attention_layer(x)
+#         return self.classifier(x, **kwargs)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,19 @@ TRUECAM (**TR**ustworthiness-focused, **U**ncertainty-aware, **E**nd-to-end **CA
 - _**Why use TRUECAM?**_: TRUECAM can be seamlessly deployed in conjunction with SOTA foundation models ([UNI](https://github.com/mahmoodlab/UNI), [CONCH](https://github.com/mahmoodlab/CONCH), [Prov-Gigapath](https://github.com/prov-gigapath/prov-gigapath), [TITAN](https://github.com/mahmoodlab/TITAN)) that utilize pretrained visual encoders. Its flexible framework allows for the incorporation of various deep learning models to **enhance performance** on medical imaging tasks, ensuring that TRUECAM benefits from recent advancements in AI while providing robust **uncertainty quantification and interpretability**. This adaptability facilitates the integration of TRUECAM into clinical workflows, bridging the gap between traditional pathology practices and modern computational techniques, ultimately leading to more effective and reliable outcomes in cancer diagnostics.
 
 
+## 🧪 Quick-start Demos
+
+We provide three ready-to-run Jupyter notebooks that illustrate the core components of TRUECAM end-to-end:
+
+| Demo | Notebook | What it shows |
+|------|----------|---------------|
+| **EAT + ABMIL** | [`notebooks/eat_demo.ipynb`](notebooks/eat_demo.ipynb) | Train a tile-level proxy model to score ambiguity, then filter noisy tiles to improve slide-level ABMIL classification. |
+| **Conformal Prediction** | [`notebooks/conformal_prediction_demo.ipynb`](notebooks/conformal_prediction_demo.ipynb) | Build prediction sets with marginal coverage guarantees and evaluate empirical coverage & set size. |
+| **OOD Detection (SNGP)** | [`notebooks/ood_detection_demo.ipynb`](notebooks/ood_detection_demo.ipynb) | Detect out-of-distribution slides using a spectral-normalized neural Gaussian process on TITAN slide embeddings. |
+
+These demos are self-contained — just open the notebook, follow the cells, and you'll have a running example of each TRUECAM pillar.
+
+
 ## 🚀 What\'s New
 
 1. **Released curated dataset split CSVs**: Added `train`, `val`, and `test` split files to facilitate reproducibility for TCGA-OT (following [TITAN](https://github.com/mahmoodlab/TITAN)), BRACS, TCGA-BRTS (brain tumor subtyping), TCGA-BRCA, TCGA-RCC. GTEx-lung metadata references are available via [the supplementary tables](https://pmc.ncbi.nlm.nih.gov/articles/PMC5011060/).  
