@@ -57,8 +57,9 @@ cd TRUECAM
 
 2. Install TRUECAM and its dependencies, but the package version is not strictly required.
 ```Shell
-conda env create -f environment.yaml
+conda env create -f environment.yaml --solver libmamba
 conda activate truecam
+pip install xformers==0.0.28.post3 --no-build-isolation
 pip install -e .
 ```
 3. Install [sngp_wrapper](https://github.com/iamownt/sngp_wrapper) following instructions.
