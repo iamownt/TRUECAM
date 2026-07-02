@@ -1,478 +1,531 @@
-import numpy as np
-import torch
-import torch.nn as nn
-import torchvision
-from torch.utils.data import Dataset, DataLoader
-from pathlib import Path
-import time
-import glob
-from tqdm import tqdm
-import os
-from PIL import Image
-import pickle
-import timm
-import h5py
-from functools import partial
-import gc
-from ABMIL import load_pickle_model, save_pickle_data
-import pandas as pd
-import copy
-from sklearn.metrics import roc_auc_score, accuracy_score
-from sklearn.model_selection import KFold
-from ABMIL import seed_everything, save_pickle_data
+from __future__ import annotations
+
 import argparse
+import gc
+import pickle
+import sys
+import time
 from collections import defaultdict
-from easydict import EasyDict as edict
-from scipy.special import softmax
-from torchvision.transforms import v2
-from sklearn.preprocessing import StandardScaler
-from autogluon.tabular import TabularPredictor
-from train_eat import evaluate_eat_patient_metric, binary_search_for_best_threshold, create_ambiguity_dict, load_lr_dataset_and_predict
-from sklearn.decomposition import PCA
-from autogluon.core.metrics import make_scorer
-from train_eat import evaluate_tile_average_accuracy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import h5py
+import lightgbm as lgb
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.metrics import accuracy_score, balanced_accuracy_score
+from tqdm import tqdm
+
+sys.path.extend(["/home/user/wangtao/prov-gigapath"])
+
+from train_eat import (  # noqa: E402
+    binary_search_for_best_threshold,
+    evaluate_eat_patient_metric,
+)
+from diverse_mil.utils import get_dataset_type, load_data_from_split, save_pickle_data, seed_everything  # noqa: E402
 
 
-def get_eat_lr_params():
-    parser = argparse.ArgumentParser(description='ABMIL on downstream tasks')
-    parser.add_argument('--trial',                  type=int,  default=4,  help='Set trial')
-    parser.add_argument('--fold',                   type=int,  default=5,  help='Set fold')
-    parser.add_argument('--start_trial',            type=int,  default=0,  help='Set Start trial')
-    parser.add_argument('--start_fold',             type=int,  default=0,  help='Set Start trial')
-    parser.add_argument('--sample_fraction',        type=float,  default=0.01,  help='Set fold')
+@dataclass(frozen=True)
+class FeatureConfig:
+    model_name: str
+    dataset_h5: Path
+    embed_dim: int
 
-    parser.add_argument('--seed',                   type=int,  default=2024,  help='Random seed')
-    parser.add_argument('--model_name',             type=str,  default="uni", help='Model name')
-    parser.add_argument('--save_mask_tile',       action='store_true', help='whether to save tiles')
-    parser.add_argument('--evaluate_only',       action='store_true', help='whether to evaluate the model')
-    parser.add_argument('--ood_dataset_name', type=str, default="ucs", choices=["ucs", "uvm", "acc", "blca"], help='An additional argument')
-    parser.add_argument('--generate_ood',        action='store_true', help='If set True, will generate the ood data')
-    parser.add_argument('--pca',                 action='store_true', help='whether to use pca')
-    parser.add_argument('--pca_dim',             type=int, default=None, help='pca dimension')
-    parser.add_argument('--tuning_method',       type=int, default=0, help='tuning method')
-    parser.add_argument('--save_destination',       type=str, default="/home/user/sngp/UniConch/models/", help='Model and parquet save path')
+
+BASE_FEATURE_CONFIGS = {
+    "uni": FeatureConfig("uni", Path("/home/user/TCGA-OT/Patch256/UNI/pt_files"), 1024),
+    "conch": FeatureConfig("conch", Path("/home/user/TCGA-OT/Patch256/CONCH/pt_files"), 512),
+    "titan": FeatureConfig("titan", Path("/home/user/sngp/TCGA-OT/Patch512/TITAN/pt_files"), 768),
+}
+
+
+def parse_int_or_none(value: str) -> Optional[int]:
+    if value.lower() == "none":
+        return None
+    return int(value)
+
+
+def get_eat_lr_params() -> Tuple[argparse.ArgumentParser, argparse.Namespace]:
+    parser = argparse.ArgumentParser(
+        description="Train a weakly supervised LightGBM proxy for EAT tile ambiguity."
+    )
+    parser.add_argument("--model_name", choices=["uni", "conch", "titan"], default="titan")
+    parser.add_argument("--subtyping_task", type=str, default="NSCLC")
+    parser.add_argument("--sample_fraction", type=float, default=0.4,
+                        help="Fraction of each training slide's tiles used to train the proxy.")
+    parser.add_argument("--seed", type=int, default=2024)
+    parser.add_argument("--evaluate_only", action="store_true",
+                        help="Load saved LightGBM models and regenerate ambiguity/evaluation outputs.")
+
+    parser.add_argument("--num_runs", type=int, default=20,
+                        help="Number of folds. Kept for compatibility with older scripts.")
+    parser.add_argument("--num_folds", type=int, default=None,
+                        help="Overrides --num_runs when set.")
+    parser.add_argument("--start_fold", type=int, default=0,
+                        help="First fold index to process.")
+    parser.add_argument("--start_trial", type=int, default=0,
+                        help="First trial index. Usually 0 for the revision split files.")
+    parser.add_argument("--num_trials", type=int, default=1,
+                        help="Number of trial seeds to run.")
+
+    parser.add_argument("--save_destination", type=Path, default=Path("/home/user/sngp/TCGA-OT/models"))
+    parser.add_argument("--model_output_dir", type=Path, default=Path("/home/user/sngp/TCGA-OT/models/lightgbm_proxy"))
+    parser.add_argument("--results_file_path", type=str, default="final_results_lightgbm_proxy.csv")
+    parser.add_argument("--skip_existing_models", action="store_true",
+                        help="Skip training when a fold model already exists; still scores the fold.")
+    parser.add_argument("--write_trial_fold_aliases", action=argparse.BooleanOptionalAction, default=True,
+                        help="Also save t{trial}f{fold} keys for legacy slide-embedding scripts.")
+
+    balance_group = parser.add_mutually_exclusive_group()
+    balance_group.add_argument("--use_balance_weight", dest="use_balance_weight", action="store_true", default=True,
+                               help="Use class_weight='balanced' in LightGBM. Default: enabled.")
+    balance_group.add_argument("--no_balance_weight", dest="use_balance_weight", action="store_false",
+                               help="Disable LightGBM class balancing.")
+
+    parser.add_argument("--n_estimators", type=int, default=400)
+    parser.add_argument("--learning_rate", type=float, default=0.02)
+    parser.add_argument("--num_leaves", type=int, default=64)
+    parser.add_argument("--min_child_samples", type=int, default=20)
+    parser.add_argument("--subsample", type=float, default=0.8)
+    parser.add_argument("--colsample_bytree", type=float, default=0.8)
+    parser.add_argument("--reg_alpha", type=float, default=0.1)
+    parser.add_argument("--reg_lambda", type=float, default=0.1)
+    parser.add_argument("--n_jobs", type=int, default=16)
+    parser.add_argument("--predict_batch_size", type=int, default=250_000)
+    parser.add_argument("--feature_key", type=str, default="features",
+                        help="Feature key for H5/dict PT files; falls back to features/tile_embeds.")
+
+    # Accepted for old launch scripts; intentionally unused in this LightGBM-only refactor.
+    parser.add_argument("--num_gpus", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--presets", type=str, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--time_limit", type=parse_int_or_none, default=None, help=argparse.SUPPRESS)
+
     args = parser.parse_args()
-    args.save_destination = Path(args.save_destination)
-    if args.pca and args.pca_dim is None:
-        raise ValueError("PCA dimension is not set")
-    if args.generate_ood:
-        assert args.evaluate_only is True, "Generate ood data should be used with evaluate only mode"
+    args.num_folds = args.num_folds if args.num_folds is not None else args.num_runs
+    args.num_runs = args.num_folds
+    if not 0 < args.sample_fraction <= 1:
+        raise ValueError("--sample_fraction must be in (0, 1].")
+    if args.start_fold < 0 or args.start_fold >= args.num_folds:
+        raise ValueError("--start_fold must be within [0, num_folds).")
+    if args.num_trials < 1:
+        raise ValueError("--num_trials must be >= 1.")
+    if "bracs" in args.subtyping_task:
+        assert args.subtyping_task in ["bracs-coarse", "bracs-finegrain"]
+
+    args.save_destination.mkdir(parents=True, exist_ok=True)
+    args.model_output_dir.mkdir(parents=True, exist_ok=True)
+    args.weight_suffix = "balanced" if args.use_balance_weight else "unbalanced"
     return parser, args
 
 
+def load_training_config(model_name: str, subtyping_task: Optional[str] = None) -> FeatureConfig:
+    base = BASE_FEATURE_CONFIGS[model_name]
+    dataset_type = get_dataset_type(subtyping_task)
+    middle = "Patch512" if model_name == "titan" else "Patch256"
 
-def create_slide_int_to_patient_mapping(df):
-    slide_int_to_patient = dict(zip(df["slide_int"], df["patient"]))
-    return slide_int_to_patient
-
-
-def read_assets_from_h5(h5_path: str) -> tuple:
-    '''Read the assets from the h5 file'''
-    assets = {}
-    attrs = {}
-    with h5py.File(h5_path, 'r') as f:
-        for key in f.keys():
-            assets[key] = f[key][:]
-            if f[key].attrs is not None:
-                attrs[key] = dict(f[key].attrs)
-    return assets
-
-def load_lr_dataset(dataset_h5, filter_mapping, sample_size=None, sample_fraction=None, mapping=None, embed_dim=1024):
-    h5_paths = os.listdir(dataset_h5)
-    h5_paths = [dataset_h5 / path for path in h5_paths if int(path[:-3]) in filter_mapping.keys()]
-    h5_labels = [filter_mapping[int(h5_path.name[:-3])] for h5_path in h5_paths]
-
-    # memory_list = []
-    # label_list = []
-    tag, tag_p = [], []
-    tbar = tqdm(h5_paths, desc="Reading h5 files")
-    features, labels = np.empty((10000000, embed_dim), dtype=np.float16), np.empty((10000000,), dtype=np.int8)
-    start_idx = 0
-    for i, path in enumerate(h5_paths):
-        assets = read_assets_from_h5(path)["tile_embeds"]
-        if sample_fraction is not None:
-            select_bool = np.random.rand(len(assets)) < sample_fraction
-            assets = assets[select_bool]
-        features[start_idx:start_idx + len(assets)] = assets
-        labels[start_idx:start_idx + len(assets)] = h5_labels[i]
-        tag.append(len(assets) * [path.stem])
-        if mapping is not None:
-            tag_p.append(len(assets)*[mapping[int(path.stem)]])
-        start_idx += len(assets)
-        tbar.update(1)
-    features = features[:start_idx]
-    labels = labels[:start_idx]
-    # features = np.concatenate(memory_list, axis=0)
-    # labels = np.concatenate(label_list, axis=0)
-    tag = np.concatenate(tag, axis=0)
-    if len(tag_p) > 0:
-        tag_p = np.concatenate(tag_p, axis=0)
-    print("features.shape", features.shape, "labels.shape", labels.shape, "sample_size", sample_size)
-    if sample_size is None:
-        base_output = tuple([features, labels, tag])
-        if len(tag_p) > 0:
-            base_output += (tag_p,)
-    base_output = tuple([features[:sample_size], labels[:sample_size], tag[:sample_size]])
-    if len(tag_p) > 0:
-        base_output += (tag_p[:sample_size],)
-    return base_output
-
-
-
-class UniLRConfig:
-    dataset_h5 = Path("/home/user/sngp/UniConch/uni_tcga_h5file")
-    dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/nsclc_labels.csv")
-    etest_h5 = Path("/home/user/sngp/UniConch/uni_cptac_h5file")
-    external_dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/external_nsclc_labels.csv")
-
-    embed_dim = 1024
-    label_dict = {"LUAD": 0, "LUSC": 1}
-
-class ConchLRConfig:
-    dataset_h5 = Path("/home/user/sngp/UniConch/conch_tcga_h5file")
-    dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/nsclc_labels.csv")
-    etest_h5 = Path("/home/user/sngp/UniConch/conch_cptac_h5file")
-    external_dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/external_nsclc_labels.csv")
-
-    embed_dim = 512
-    label_dict = {"LUAD": 0, "LUSC": 1}
-
-
-class ProvConfig:
-    dataset_h5 = Path("/home/user/sngp/project/destination_20X/h5file")
-    dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/nsclc_labels.csv")
-    etest_h5 = Path("/home/user/sngp/project/cptac_destination_20X/h5file")
-    external_dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/external_nsclc_labels.csv")
-
-    embed_dim = 1536
-    label_dict = {"LUAD": 0, "LUSC": 1}
-
-
-class TITANConfig:
-    dataset_h5 = Path("/home/user/sngp/project/titan_destination_20X/h5file")
-    dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/nsclc_labels.csv")
-    etest_h5 = None
-    external_dataset_csv = None
-
-    embed_dim = 768
-    label_dict = {"LUAD": 0, "LUSC": 1}
-
-class TITANCPTACConfig:
-    dataset_h5 = Path("/home/user/sngp/project/titan_cptac_destination_20X/h5file")
-    dataset_csv = Path("/home/user/wangtao/prov-gigapath/dataset_csv/nsclc/external_nsclc_labelsv2.csv")
-    etest_h5 = None
-    external_dataset_csv = None
-
-    embed_dim = 768
-    label_dict = {"LUAD": 0, "LUSC": 1}
-
-def load_lr_config(model_name):
-    if model_name == "uni":
-        return UniLRConfig
-    elif model_name == "conch":
-        return ConchLRConfig
-    elif model_name == "prov-gigapath":
-        return ProvConfig
-    elif model_name == "titan":
-        return TITANConfig
-    elif model_name == "titan-cptac":
-        return TITANCPTACConfig
+    if dataset_type in ["bracs-coarse", "bracs-finegrain"]:
+        root = Path("/home/user/sngp/BRACS")
+    elif dataset_type == "dhmc_luad":
+        root = Path("/home/user/sngp/DHMC/LUAD")
+    elif dataset_type == "tcga_ot":
+        root = Path("/home/user/sngp/TCGA-OT")
+    elif dataset_type == "qmh_lung":
+        root = Path("/home/user/sngp/QMH")
+    elif dataset_type == "dhmc_pathben":
+        root = Path("/home/user/sngp/DHMC/LUAD")
     else:
-        raise ValueError("Model name not found")
+        raise ValueError(f"Unknown dataset type {dataset_type}")
+
+    dataset_h5 = root / middle / model_name.upper() / "pt_files"
+    config = FeatureConfig(model_name=model_name, dataset_h5=dataset_h5, embed_dim=base.embed_dim)
+    print(f"Using tile feature path: {config.dataset_h5}")
+    return config
 
 
-def memory_restrict_amb_generate_function(args):
-    """if the machine can not train on full data, this function can post generate ambiguity score for the dataset"""
-    seed_everything(args.seed)
-    config = load_lr_config(args.model_name)
-    if config.etest_h5 is None or config.external_dataset_csv is None:
-        has_etest = False
-        print("Warning: No external test set")
+def _feature_from_mapping(obj: Dict, requested_key: str, source: Path):
+    for key in [requested_key, "features", "tile_embeds"]:
+        if key in obj:
+            return obj[key]
+    raise KeyError(f"No feature key found in {source}. Tried: {requested_key}, features, tile_embeds")
+
+
+def read_feature_matrix(path: Path, feature_key: str = "features") -> np.ndarray:
+    suffix = path.suffix.lower()
+    if suffix in [".h5", ".hdf5"]:
+        with h5py.File(path, "r") as handle:
+            features = _feature_from_mapping(handle, feature_key, path)[:]
+    elif suffix == ".pt":
+        obj = torch.load(path, map_location="cpu")
+        if isinstance(obj, dict):
+            features = _feature_from_mapping(obj, feature_key, path)
+        else:
+            features = obj
+        if torch.is_tensor(features):
+            features = features.detach().cpu().numpy()
     else:
-        has_etest = True
-    itest_ambiguity_dict = defaultdict(lambda: defaultdict(list))
-    etest_ambiguity_dict = defaultdict(lambda: defaultdict(list))
-    metric_dict = defaultdict(list)
-    for i in range(args.trial):
-        for j in range(args.fold):
-            print(f"Trial {i}, Fold {j}")
-            df = pd.read_csv(config.dataset_csv)
-            df["cohort"] = df["cohort"].apply(lambda x: config.label_dict[x])
-            if has_etest:
-                external_df = pd.read_csv(config.external_dataset_csv)
-                external_df["cohort"] = external_df["cohort"].apply(lambda x: config.label_dict[x])
-            split_key = f"split{args.fold * i + j}"
+        raise ValueError(f"Unsupported feature file extension: {path}")
 
-            train_df, val_df, test_df = df[df[split_key] == "train"], df[df[split_key] == "val"], df[df[split_key] == "test"]
-            train_df_mapping = train_df.set_index("slide_int")["cohort"].to_dict()
-            val_df_mapping = val_df.set_index("slide_int")["cohort"].to_dict()
-            test_df_mapping = test_df.set_index("slide_int")["cohort"].to_dict()
-            i_s_to_p_mapping = create_slide_int_to_patient_mapping(df)
-
-            if has_etest:
-                external_df_mapping = external_df.set_index("slide_int")["cohort"].to_dict()
-                e_s_to_p_mapping = create_slide_int_to_patient_mapping(external_df)
-
-            save_gluon_model_path = Path("/home/user/wangtao/prov-gigapath/AutogluonModels/")
-            save_gluon_model_path = save_gluon_model_path / f"{args.model_name}_t{i}f{j}_frac{args.sample_fraction}_tuning{args.tuning_method}_seed{args.seed}"
-
-            predictor = TabularPredictor.load(str(save_gluon_model_path))
-
-            train_predictions, train_labels, train_tag = load_lr_dataset_and_predict(config.dataset_h5, train_df_mapping, predictor, np_input=False)
-            val_predictions, val_labels, val_tag = load_lr_dataset_and_predict(config.dataset_h5, val_df_mapping, predictor, np_input=False)
-            test_predictions, test_labels, test_tag = load_lr_dataset_and_predict(config.dataset_h5, test_df_mapping, predictor, np_input=False)
-            print("train_predictions", train_predictions.shape, "val_predictions", val_predictions.shape)
-            print("test_predictions", test_predictions.shape)
-            if has_etest:
-                etest_predictions, etest_labels, etest_tag, etest_tagp = load_lr_dataset_and_predict(config.etest_h5,
-                                                                                                     external_df_mapping,
-                                                                                                     predictor,
-                                                                                                     np_input=False,
-                                                                                                     mapping=e_s_to_p_mapping)
-                print("etest_predictions", etest_predictions.shape)
-            train_ambiguity_dict, train_quantile_list = create_ambiguity_dict(train_predictions, train_tag)
-            val_ambiguity_dict, val_quantile_list = create_ambiguity_dict(val_predictions, val_tag)
-
-            itest_ambiguity_dict[f"t{i}f{j}"].update(train_ambiguity_dict)
-            itest_ambiguity_dict[f"t{i}f{j}"].update(val_ambiguity_dict)
-            itest_ambiguity_dict[f"t{i}f{j}"]["train_quantile_list"] = train_quantile_list
-            itest_ambiguity_dict[f"t{i}f{j}"]["val_quantile_list"] = val_quantile_list
-
-            test_ambiguity_dict, _ = create_ambiguity_dict(test_predictions, test_tag)
-            itest_ambiguity_dict[f"t{i}f{j}"].update(test_ambiguity_dict)
-            if has_etest:
-                etest_ambiguity_dict_g, _ = create_ambiguity_dict(etest_predictions, etest_tag)
-                etest_ambiguity_dict[f"t{i}f{j}"].update(etest_ambiguity_dict_g)
-
-            best_threshold, best_accuracy = binary_search_for_best_threshold(val_quantile_list[0], val_quantile_list[-1], val_predictions, val_labels, val_tag)
+    features = np.asarray(features)
+    if features.ndim == 3 and features.shape[0] == 1:
+        features = features[0]
+    if features.ndim != 2:
+        raise ValueError(f"Expected a 2D tile feature matrix in {path}, got shape {features.shape}")
+    return np.asarray(features, dtype=np.float32, order="C")
 
 
-            itest_acc, itest_auc, itest_eat_acc, itest_eat_auc, proportion = (
-                evaluate_eat_patient_metric(best_threshold, test_predictions, test_labels, test_tag))
-            print(f"Itest Patient Accuracy = {itest_acc:.3f}, Patient AUC = {itest_auc:.3f}")
-            print(
-                f"Itest EAT Patient Accuracy = {itest_eat_acc:.3f}, EAT Patient AUC = {itest_eat_auc:.3f}, Removing {proportion}")
-            if has_etest:
-                etest_acc, etest_auc, etest_eat_acc, etest_eat_auc, etest_proportion = (
-                    evaluate_eat_patient_metric(best_threshold, etest_predictions, etest_labels, etest_tagp))
-                print(f"Etest Patient Accuracy = {etest_acc:.3f}, Patient AUC = {etest_auc:.3f}")
-                print(
-                    f"Etest EAT Patient Accuracy = {etest_eat_acc:.3f}, EAT Patient AUC = {etest_eat_auc:.3f}, Removing {etest_proportion}")
-                metric_dict["etest_acc"].append(etest_acc)
-                metric_dict["etest_auc"].append(etest_auc)
-                metric_dict["etest_eat_acc"].append(etest_eat_acc)
-                metric_dict["etest_eat_auc"].append(etest_eat_auc)
-            metric_dict["itest_acc"].append(itest_acc)
-            metric_dict["itest_auc"].append(itest_auc)
-            metric_dict["itest_eat_acc"].append(itest_eat_acc)
-            metric_dict["itest_eat_auc"].append(itest_eat_auc)
-
-    if args.save_mask_tile:
-        save_pickle_data(edict(itest_ambiguity_dict), args.save_destination / "ambpkl" / "newambk" / f"{args.model_name}_itest_ambiguity_dict_autogluon_{args.sample_fraction}_tuning{args.tuning_method}.pkl")
-        if has_etest:
-            save_pickle_data(edict(etest_ambiguity_dict),
-                             args.save_destination / "ambpkl" / "newambk" / f"{args.model_name}_etest_ambiguity_dict_autogluon_{args.sample_fraction}_tuning{args.tuning_method}.pkl")
-
-    df_metrics = pd.DataFrame(metric_dict)
-    summary_metrics = df_metrics.agg(['mean', 'std']).transpose()
-    print(summary_metrics)
+def iter_feature_paths(dataset_h5: Path, filter_mapping: Dict[str, int]) -> List[Path]:
+    suffixes = {".pt", ".h5", ".hdf5"}
+    paths = [
+        dataset_h5 / name
+        for name in sorted(p.name for p in dataset_h5.iterdir() if p.suffix.lower() in suffixes)
+        if Path(name).stem in filter_mapping
+    ]
+    if not paths:
+        raise FileNotFoundError(f"No feature files in {dataset_h5} matched the split mapping.")
+    return paths
 
 
-def memory_restrict_amb_generate_ood_function(args):
-    """if the machine can not train on full data, this function can post generate ambiguity score for the dataset"""
-    from evaluate_everything import load_ood_config
-    seed_everything(args.seed)
-    config = load_ood_config(model_name=args.model_name, ood_dataset=args.ood_dataset_name)
-    ood_ambiguity_dict = defaultdict(lambda: defaultdict(list))
-    for i in range(args.trial):
-        for j in range(args.fold):
-            print(f"Trial {i}, Fold {j}")
-            save_gluon_model_path = Path("/home/user/wangtao/prov-gigapath/AutogluonModels/")
-            save_gluon_model_path = save_gluon_model_path / f"{args.model_name}_t{i}f{j}_frac{args.sample_fraction}_tuning{args.tuning_method}_seed{args.seed}"
-            predictor = TabularPredictor.load(str(save_gluon_model_path))
+def sample_tiles(features: np.ndarray, fraction: float, rng: np.random.Generator) -> np.ndarray:
+    if fraction >= 1:
+        return features
+    n_tiles = features.shape[0]
+    keep = max(1, int(np.ceil(n_tiles * fraction)))
+    indices = np.sort(rng.choice(n_tiles, size=keep, replace=False))
+    return features[indices]
 
-            predictions, labels, tag = load_lr_dataset_and_predict(Path(config.h5_path),
-                                                                   load_pickle_model(config.pkl_path)["itop"],
-                                                                   predictor,
-                                                                   np_input=False)
-            print("predictions", predictions.shape, "labels", labels.shape)
 
-            ambiguity_dict, quantile_list = create_ambiguity_dict(predictions, tag)
+def build_training_tiles(
+    dataset_h5: Path,
+    filter_mapping: Dict[str, int],
+    sample_fraction: float,
+    rng: np.random.Generator,
+    feature_key: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    x_chunks: List[np.ndarray] = []
+    y_chunks: List[np.ndarray] = []
 
-            ood_ambiguity_dict[f"t{i}f{j}"].update(ambiguity_dict)
-            ood_ambiguity_dict[f"t{i}f{j}"]["val_quantile_list"] = quantile_list
-    try:
-        if args.save_mask_tile:
-            save_pickle_data(edict(ood_ambiguity_dict), args.save_destination / "ambpkl" / "newambk" / f"{args.model_name}_{args.ood_dataset_name}_ambiguity_dict_autogluon_{args.sample_fraction}_tuning{args.tuning_method}.pkl")
-            pass
-    except Exception as e:
-        print(e)
-        print(ood_ambiguity_dict)
-        print(ood_ambiguity_dict.keys())
-    print("OOD Generation Finished")
+    paths = iter_feature_paths(dataset_h5, filter_mapping)
+    for path in tqdm(paths, desc="Loading sampled train tiles"):
+        slide_id = path.stem
+        features = sample_tiles(read_feature_matrix(path, feature_key), sample_fraction, rng)
+        x_chunks.append(features)
+        y_chunks.append(np.full(features.shape[0], filter_mapping[slide_id], dtype=np.int64))
 
+    x_train = np.concatenate(x_chunks, axis=0)
+    y_train = np.concatenate(y_chunks, axis=0)
+    print(f"train tiles={x_train.shape}, classes={dict(zip(*np.unique(y_train, return_counts=True)))}")
+    return x_train, y_train
+
+
+def make_lightgbm(args: argparse.Namespace, num_classes: int, random_state: int) -> lgb.LGBMClassifier:
+    objective = "binary" if num_classes == 2 else "multiclass"
+    params = {
+        "boosting_type": "gbdt",
+        "objective": objective,
+        "num_leaves": args.num_leaves,
+        "learning_rate": args.learning_rate,
+        "n_estimators": args.n_estimators,
+        "min_child_samples": args.min_child_samples,
+        "subsample": args.subsample,
+        "colsample_bytree": args.colsample_bytree,
+        "reg_alpha": args.reg_alpha,
+        "reg_lambda": args.reg_lambda,
+        "class_weight": "balanced" if args.use_balance_weight else None,
+        "random_state": random_state,
+        "n_jobs": args.n_jobs,
+        "device_type": "cpu",
+        "verbosity": -1,
+    }
+    if num_classes > 2:
+        params["num_class"] = num_classes
+    return lgb.LGBMClassifier(**params)
+
+
+def model_path(args: argparse.Namespace, trial_idx: int, fold_idx: int) -> Path:
+    run_dir = args.model_output_dir / (
+        f"{args.model_name}_{args.subtyping_task}_frac{args.sample_fraction}_{args.weight_suffix}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir / f"trial{trial_idx}_fold{fold_idx}.pkl"
+
+
+def save_model(model: lgb.LGBMClassifier, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as handle:
+        pickle.dump(model, handle)
+
+
+def load_model(path: Path) -> lgb.LGBMClassifier:
+    with open(path, "rb") as handle:
+        return pickle.load(handle)
+
+
+def train_lightgbm_proxy(
+    config: FeatureConfig,
+    args: argparse.Namespace,
+    train_mapping: Dict[str, int],
+    num_classes: int,
+    trial_idx: int,
+    fold_idx: int,
+) -> lgb.LGBMClassifier:
+    path = model_path(args, trial_idx, fold_idx)
+    if args.evaluate_only or (args.skip_existing_models and path.exists()):
+        print(f"Loading LightGBM proxy: {path}")
+        return load_model(path)
+
+    rng = np.random.default_rng(args.seed + trial_idx * 10_000 + fold_idx)
+    x_train, y_train = build_training_tiles(
+        config.dataset_h5, train_mapping, args.sample_fraction, rng, args.feature_key
+    )
+    model = make_lightgbm(args, num_classes=num_classes, random_state=args.seed + trial_idx * 10_000 + fold_idx)
+    print("Training LightGBM proxy...")
+    model.fit(x_train, y_train)
+    save_model(model, path)
+    del x_train, y_train
+    gc.collect()
+    print(f"Saved LightGBM proxy: {path}")
+    return model
+
+
+def predict_proba_batched(model: lgb.LGBMClassifier, features: np.ndarray, batch_size: int) -> np.ndarray:
+    if features.shape[0] <= batch_size:
+        return np.asarray(model.predict_proba(features), dtype=np.float32)
+    chunks = []
+    for start in range(0, features.shape[0], batch_size):
+        chunks.append(np.asarray(model.predict_proba(features[start:start + batch_size]), dtype=np.float32))
+    return np.concatenate(chunks, axis=0)
+
+
+def quantiles_from_ambiguity(ambiguity_chunks: Iterable[np.ndarray]) -> np.ndarray:
+    ambiguity = np.concatenate([np.asarray(chunk, dtype=np.float32) for chunk in ambiguity_chunks], axis=0)
+    return np.quantile(ambiguity, np.linspace(0.1, 0.9, 9))
+
+
+def score_split(
+    split_name: str,
+    dataset_h5: Path,
+    filter_mapping: Dict[str, int],
+    patient_mapping: Dict[str, str],
+    model: lgb.LGBMClassifier,
+    args: argparse.Namespace,
+    keep_eval_arrays: bool,
+) -> Tuple[Dict[str, dict], np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+    ambiguity_dict: Dict[str, dict] = defaultdict(dict)
+    ambiguity_chunks: List[np.ndarray] = []
+    prediction_chunks: List[np.ndarray] = []
+    label_chunks: List[np.ndarray] = []
+    patient_tag_chunks: List[np.ndarray] = []
+
+    paths = iter_feature_paths(dataset_h5, filter_mapping)
+    for path in tqdm(paths, desc=f"Scoring {split_name} tiles"):
+        slide_id = path.stem
+        features = read_feature_matrix(path, args.feature_key)
+        probabilities = predict_proba_batched(model, features, args.predict_batch_size)
+        ambiguity = 1.0 - np.max(probabilities, axis=1)
+
+        ambiguity_dict[slide_id]["ambiguity"] = ambiguity.astype(np.float16)
+        ambiguity_dict[slide_id]["probabilities"] = probabilities.astype(np.float16)
+        ambiguity_chunks.append(ambiguity)
+
+        if keep_eval_arrays:
+            labels = np.full(probabilities.shape[0], filter_mapping[slide_id], dtype=np.int64)
+            patient_id = slide_id if "bracs" in args.subtyping_task else patient_mapping.get(slide_id, slide_id)
+            prediction_chunks.append(probabilities)
+            label_chunks.append(labels)
+            patient_tag_chunks.append(np.full(probabilities.shape[0], patient_id, dtype=object))
+
+    quantile_list = quantiles_from_ambiguity(ambiguity_chunks)
+    if not keep_eval_arrays:
+        return ambiguity_dict, quantile_list, None, None, None
+
+    return (
+        ambiguity_dict,
+        quantile_list,
+        np.concatenate(prediction_chunks, axis=0),
+        np.concatenate(label_chunks, axis=0),
+        np.concatenate(patient_tag_chunks, axis=0),
+    )
+
+
+def mapping_from_split(df: pd.DataFrame) -> Dict[str, int]:
+    return df.set_index("slide_id")["cohort"].to_dict()
+
+
+def evaluate_predictions(
+    val_predictions: np.ndarray,
+    val_labels: np.ndarray,
+    val_patient_tags: np.ndarray,
+    val_quantiles: np.ndarray,
+    test_predictions: np.ndarray,
+    test_labels: np.ndarray,
+    test_patient_tags: np.ndarray,
+) -> Dict[str, float]:
+    val_tile_acc = accuracy_score(val_labels, val_predictions.argmax(axis=1))
+    val_tile_bacc = balanced_accuracy_score(val_labels, val_predictions.argmax(axis=1))
+    best_threshold, best_accuracy = binary_search_for_best_threshold(
+        val_quantiles[0],
+        val_quantiles[-1],
+        val_predictions,
+        val_labels,
+        val_patient_tags,
+        metric="balanced_accuracy",
+        print_str=False,
+    )
+    test_acc, test_bacc, test_eat_acc, test_eat_bacc, proportion = evaluate_eat_patient_metric(
+        best_threshold,
+        test_predictions,
+        test_labels,
+        test_patient_tags,
+    )
+    return {
+        "val_tile_acc": float(val_tile_acc),
+        "val_tile_bacc": float(val_tile_bacc),
+        "best_threshold": float(best_threshold),
+        "best_val_bacc": float(best_accuracy),
+        "test_acc": float(test_acc),
+        "test_bacc": float(test_bacc),
+        "test_eat_acc": float(test_eat_acc),
+        "test_eat_bacc": float(test_eat_bacc),
+        "proportion": float(proportion),
+    }
+
+
+def run_fold(
+    config: FeatureConfig,
+    args: argparse.Namespace,
+    trial_idx: int,
+    fold_idx: int,
+) -> Tuple[Dict[str, float], Dict[str, dict]]:
+    args.split_idx = fold_idx
+    train_df, val_df, test_df, label_dict, slide_to_patient = load_data_from_split(args, fold_idx)
+    num_classes = len(np.unique(list(label_dict.values())))
+    train_mapping = mapping_from_split(train_df)
+    val_mapping = mapping_from_split(val_df)
+    test_mapping = mapping_from_split(test_df)
+
+    print(
+        f"trial={trial_idx} fold={fold_idx} | "
+        f"train={train_df.shape} val={val_df.shape} test={test_df.shape} classes={num_classes}"
+    )
+    print("train labels:", train_df["cohort"].value_counts().sort_index().to_dict())
+    print("val labels:", val_df["cohort"].value_counts().sort_index().to_dict())
+    print("test labels:", test_df["cohort"].value_counts().sort_index().to_dict())
+
+    model = train_lightgbm_proxy(config, args, train_mapping, num_classes, trial_idx, fold_idx)
+
+    train_amb, train_quantiles, *_ = score_split(
+        "train", config.dataset_h5, train_mapping, slide_to_patient, model, args, keep_eval_arrays=False
+    )
+    val_amb, val_quantiles, val_predictions, val_labels, val_patient_tags = score_split(
+        "val", config.dataset_h5, val_mapping, slide_to_patient, model, args, keep_eval_arrays=True
+    )
+    test_amb, _, test_predictions, test_labels, test_patient_tags = score_split(
+        "test", config.dataset_h5, test_mapping, slide_to_patient, model, args, keep_eval_arrays=True
+    )
+
+    metrics = evaluate_predictions(
+        val_predictions,
+        val_labels,
+        val_patient_tags,
+        val_quantiles,
+        test_predictions,
+        test_labels,
+        test_patient_tags,
+    )
+    print(
+        f"fold={fold_idx} test bacc={metrics['test_bacc']:.4f} "
+        f"eat bacc={metrics['test_eat_bacc']:.4f} remove={metrics['proportion']:.4f}"
+    )
+
+    fold_ambiguity: Dict[str, dict] = defaultdict(dict)
+    fold_ambiguity.update(train_amb)
+    fold_ambiguity.update(val_amb)
+    fold_ambiguity.update(test_amb)
+    fold_ambiguity["train_quantile_list"] = train_quantiles
+    fold_ambiguity["val_quantile_list"] = val_quantiles
+
+    del model, val_predictions, val_labels, val_patient_tags, test_predictions, test_labels, test_patient_tags
+    gc.collect()
+    return metrics, fold_ambiguity
+
+
+def ambiguity_output_path(args: argparse.Namespace) -> Path:
+    return (
+        args.save_destination
+        / "ambpkl"
+        / f"{args.model_name}_{args.subtyping_task}_ambiguity_dict_lightgbm_{args.sample_fraction}_{args.weight_suffix}.pkl"
+    )
+
+
+def summarize_metrics(args: argparse.Namespace, metric_rows: List[Dict[str, float]]) -> pd.DataFrame:
+    metric_df = pd.DataFrame(metric_rows)
+    run_columns = [col for col in ["trial", "fold"] if col in metric_df.columns]
+    metric_columns = [col for col in metric_df.columns if col not in run_columns]
+    summary_values = {}
+    for metric in metric_columns:
+        mean = metric_df[metric].mean()
+        std = metric_df[metric].std()
+        summary_values[metric] = f"{mean:.4f}+-{std:.4f}"
+    summary = pd.DataFrame([summary_values])
+    for metric in metric_columns:
+        summary[f"{metric}_list"] = [metric_df[metric].tolist()]
+    for run_column in run_columns:
+        summary[f"{run_column}_list"] = [metric_df[run_column].astype(int).tolist()]
+    summary["tag"] = f"{args.model_name}_{args.subtyping_task}_lightgbm_frac{args.sample_fraction}_{args.weight_suffix}"
+    summary["start_trial"] = args.start_trial
+    summary["num_trials"] = args.num_trials
+    summary["start_fold"] = args.start_fold
+    summary["num_folds"] = args.num_folds
+    return summary
+
+
+def append_results(args: argparse.Namespace, summary: pd.DataFrame) -> None:
+    results_path = args.save_destination / args.results_file_path
+    if results_path.exists():
+        existing = pd.read_csv(results_path)
+        summary = pd.concat([existing, summary], ignore_index=True)
+    summary.to_csv(results_path, index=False)
+    print(f"Saved metrics: {results_path}")
+
+
+def main_spawn(args: argparse.Namespace) -> None:
+    config = load_training_config(args.model_name, args.subtyping_task)
+    start = time.time()
+    metric_rows: List[Dict[str, float]] = []
+    ambiguity_keeper: Dict[str, dict] = {}
+    output_path = ambiguity_output_path(args)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(
+        f"Running LightGBM EAT proxy: model={args.model_name}, task={args.subtyping_task}, "
+        f"folds={args.start_fold}..{args.num_folds - 1}, trials={args.start_trial}..{args.start_trial + args.num_trials - 1}"
+    )
+
+    for trial_idx in range(args.start_trial, args.start_trial + args.num_trials):
+        first_fold = args.start_fold if trial_idx == args.start_trial else 0
+        for fold_idx in range(first_fold, args.num_folds):
+            metrics, fold_ambiguity = run_fold(config, args, trial_idx, fold_idx)
+            metrics["trial"] = trial_idx
+            metrics["fold"] = fold_idx
+            metric_rows.append(metrics)
+
+            split_key = f"split{fold_idx}" if args.num_trials == 1 else f"split{trial_idx}_{fold_idx}"
+            ambiguity_keeper[split_key] = fold_ambiguity
+            if args.write_trial_fold_aliases:
+                ambiguity_keeper[f"t{trial_idx}f{fold_idx}"] = fold_ambiguity
+            save_pickle_data(ambiguity_keeper, output_path)
+            print(f"Updated ambiguity pickle: {output_path}")
+
+    summary = summarize_metrics(args, metric_rows)
+    print(summary)
+    append_results(args, summary)
+    print(f"Duration: {(time.time() - start) / 60:.2f} min")
 
 
 if __name__ == "__main__":
-    _, args = get_eat_lr_params()
-    print(args)
-    if args.evaluate_only and not args.generate_ood:
-        memory_restrict_amb_generate_function(args)
-        exit(0)
-
-    if args.evaluate_only and args.generate_ood:
-        memory_restrict_amb_generate_ood_function(args)
-        exit(0)
-
-    seed_everything(args.seed)
-    config = load_lr_config(args.model_name)
-    if config.etest_h5 is None or config.external_dataset_csv is None:
-        has_etest = False
-        print("Warning: No external test set")
-    else:
-        has_etest = True
-    itest_ambiguity_dict = defaultdict(lambda: defaultdict(list))
-    etest_ambiguity_dict = defaultdict(lambda: defaultdict(list))
-    metric_dict = defaultdict(list)
-    for i in range(args.start_trial, args.trial):
-        for j in range(args.start_fold, args.fold):
-            print(f"Trial {i}, Fold {j}")
-            df = pd.read_csv(config.dataset_csv)
-            df["cohort"] = df["cohort"].apply(lambda x: config.label_dict[x])
-            if has_etest:
-                external_df = pd.read_csv(config.external_dataset_csv)
-                external_df["cohort"] = external_df["cohort"].apply(lambda x: config.label_dict[x])
-            split_key = f"split{args.fold * i + j}"
-
-            train_df, val_df, test_df = df[df[split_key] == "train"], df[df[split_key] == "val"], df[df[split_key] == "test"]
-            train_df_mapping = train_df.set_index("slide_int")["cohort"].to_dict()
-            val_df_mapping = val_df.set_index("slide_int")["cohort"].to_dict()
-            test_df_mapping = test_df.set_index("slide_int")["cohort"].to_dict()
-            i_s_to_p_mapping = create_slide_int_to_patient_mapping(df)
-
-            if has_etest:
-                external_df_mapping = external_df.set_index("slide_int")["cohort"].to_dict()
-                e_s_to_p_mapping = create_slide_int_to_patient_mapping(external_df)
-
-            train_features, train_labels, train_tag = load_lr_dataset(config.dataset_h5, train_df_mapping,
-                                                                      sample_size=None, sample_fraction=args.sample_fraction, embed_dim=config.embed_dim)
-            if args.pca:
-                pca = PCA(n_components=args.pca_dim)
-            train_features = pca.fit_transform(train_features) if args.pca else train_features
-            val_features, val_labels, val_tag = load_lr_dataset(config.dataset_h5, val_df_mapping,
-                                                                sample_size=None, sample_fraction=0.01, embed_dim=config.embed_dim)
-            val_features = pca.transform(val_features) if args.pca else val_features
-            test_features, test_labels, test_tag = load_lr_dataset(config.dataset_h5, test_df_mapping,
-                                                                   sample_size=None, sample_fraction=0.01, embed_dim=config.embed_dim)
-            test_features = pca.transform(test_features) if args.pca else test_features
-            train_data, val_data, test_data = (pd.DataFrame(train_features), pd.DataFrame(val_features),
-                                                           pd.DataFrame(test_features))
-
-            if has_etest:
-                etest_features, etest_labels, etest_tag, etest_tagp = load_lr_dataset(config.etest_h5, external_df_mapping,
-                                                                                      sample_size=None, sample_fraction=0.08,
-                                                                                      mapping=e_s_to_p_mapping, embed_dim=config.embed_dim)
-                etest_features = pca.transform(etest_features) if args.pca else etest_features
-                etest_data = pd.DataFrame(etest_features)
-                del etest_features
-                etest_data['label'] = etest_labels
-            del train_features, val_features, test_features
-            gc.collect()
-            train_data['label'], val_data['label'], test_data['label'], = train_labels, val_labels, test_labels
-
-            hyperparameters = {
-                'NN_TORCH': {},
-                'GBM': [{'extra_trees': True, 'ag_args': {'name_suffix': 'XT'}}, {}, 'GBMLarge'],
-                'CAT': {},
-                'XGB': {},
-                # 'FASTAI': {},
-            }
-            if args.tuning_method == 0:
-                tuning_data = val_data
-                tuning_tag = val_tag
-            else:
-                tuning_data = etest_data
-                tuning_tag = etest_tagp
-
-            # def confusion_removal(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-            #     y_temp = np.stack([1 - y_pred, y_pred], axis=1)
-            #
-            #     try:
-            #         _, accuracy = binary_search_for_best_threshold(None, None,
-            #                                                        y_temp, y_true,
-            #                                                        tuning_tag, print_str=False)
-            #     except Exception as e:
-            #         _, accuracy = binary_search_for_best_threshold(None, None,
-            #                                                        y_temp, y_true,
-            #                                                        etest_tagp, print_str=False)
-            #     return accuracy
-            # patient_accuracy_fn = make_scorer(name='patient_accuracy',
-            #                                   score_func=confusion_removal,
-            #                                   optimum=1,
-            #                                   needs_proba=True,
-            #                                   greater_is_better=True)
-
-            save_gluon_model_path = Path("/home/user/wangtao/prov-gigapath/AutogluonModels/")
-            save_gluon_model_path = save_gluon_model_path / f"{args.model_name}_t{i}f{j}_frac{args.sample_fraction}_tuning{args.tuning_method}_seed{args.seed}"
-            excluded_model_types = ['KNN'] # eval_metric=patient_accuracy_fn,). parameters in the init func
-            predictor = TabularPredictor(label='label', path=str(save_gluon_model_path)).fit(train_data,
-                                                                                            tuning_data=tuning_data,
-                                                                                            excluded_model_types=excluded_model_types,
-                                                                                            num_gpus=1, hyperparameters=hyperparameters)
-            # train_predictions = predictor.predict_proba(train_data.drop(columns=['label'])).values
-            val_predictions = predictor.predict_proba(val_data.drop(columns=['label'])).values
-            test_predictions = predictor.predict_proba(test_data.drop(columns=['label'])).values
-            print("test_predictions", test_predictions.shape)
-            # performance = predictor.evaluate(test_data)
-            # print("Test", performance)
-            if has_etest:
-                etest_predictions = predictor.predict_proba(etest_data.drop(columns=['label'])).values
-                performance = predictor.evaluate(etest_data)
-                print("External Test", performance)
-
-            # train_ambiguity_dict, train_quantile_list = create_ambiguity_dict(train_predictions, train_tag)
-            val_ambiguity_dict, val_quantile_list = create_ambiguity_dict(val_predictions, val_tag)
-
-            # itest_ambiguity_dict[f"t{i}f{j}"].update(train_ambiguity_dict)
-            itest_ambiguity_dict[f"t{i}f{j}"].update(val_ambiguity_dict)
-            # itest_ambiguity_dict[f"t{i}f{j}"]["train_quantile_list"] = train_quantile_list
-            itest_ambiguity_dict[f"t{i}f{j}"]["val_quantile_list"] = val_quantile_list
-
-            test_ambiguity_dict, _ = create_ambiguity_dict(test_predictions, test_tag)
-            itest_ambiguity_dict[f"t{i}f{j}"].update(test_ambiguity_dict)
-            if has_etest:
-                etest_ambiguity_dict_g, etest_quantile_list = create_ambiguity_dict(etest_predictions, etest_tag, start_quantile=0.1, end_quantile=0.9)
-                etest_ambiguity_dict[f"t{i}f{j}"].update(etest_ambiguity_dict_g)
-
-            best_threshold, best_accuracy = binary_search_for_best_threshold(val_quantile_list[0], val_quantile_list[-1], val_predictions, val_labels, val_tag)
-            # best_threshold, best_accuracy = binary_search_for_best_threshold(etest_quantile_list[0], etest_quantile_list[-1], etest_predictions, etest_labels, etest_tagp)
-
-
-            itest_acc, itest_auc, itest_eat_acc, itest_eat_auc, proportion = (
-                evaluate_eat_patient_metric(best_threshold, test_predictions, test_labels, test_tag))
-            print(f"Itest Patient Accuracy = {itest_acc:.3f}, Patient AUC = {itest_auc:.3f}")
-            print(
-                f"Itest EAT Patient Accuracy = {itest_eat_acc:.3f}, EAT Patient AUC = {itest_eat_auc:.3f}, Removing {proportion}")
-            if has_etest:
-                etest_acc, etest_auc, etest_eat_acc, etest_eat_auc, etest_proportion = (
-                    evaluate_eat_patient_metric(best_threshold, etest_predictions, etest_labels, etest_tagp))
-                print(f"Etest Patient Accuracy = {etest_acc:.3f}, Patient AUC = {etest_auc:.3f}")
-                print(
-                    f"Etest EAT Patient Accuracy = {etest_eat_acc:.3f}, EAT Patient AUC = {etest_eat_auc:.3f}, Removing {etest_proportion}")
-                metric_dict["etest_acc"].append(etest_acc)
-                metric_dict["etest_auc"].append(etest_auc)
-                metric_dict["etest_eat_acc"].append(etest_eat_acc)
-                metric_dict["etest_eat_auc"].append(etest_eat_auc)
-            metric_dict["itest_acc"].append(itest_acc)
-            metric_dict["itest_auc"].append(itest_auc)
-            metric_dict["itest_eat_acc"].append(itest_eat_acc)
-            metric_dict["itest_eat_auc"].append(itest_eat_auc)
-    if args.save_mask_tile:
-        save_pickle_data(edict(itest_ambiguity_dict), args.save_destination / "ambpkl" / f"{args.model_name}_itest_ambiguity_dict_autogluon_{args.sample_fraction}.pkl")
-        if has_etest:
-            save_pickle_data(edict(etest_ambiguity_dict), args.save_destination / "ambpkl" / f"{args.model_name}_etest_ambiguity_dict_autogluon_{args.sample_fraction}.pkl")
-    df_metrics = pd.DataFrame(metric_dict)
-    summary_metrics = df_metrics.agg(['mean', 'std']).transpose()
-    print(summary_metrics)
-
-
+    _, parsed_args = get_eat_lr_params()
+    print(parsed_args)
+    seed_everything(parsed_args.seed)
+    main_spawn(parsed_args)
