@@ -321,16 +321,13 @@ This code is made available under the MIL License.
 ## Reference
 If you find our work useful in your research or if you use parts of this code please consider citing our [paper](https://www.medrxiv.org/content/10.1101/2024.12.27.24319715v1):
 ```
-@article{Zhang2024.12.27.24319715,
-	author = {Zhang, Xiaoge and Wang, Tao and Yan, Chao and Najdawi, Fedaa and Zhou, Kai and Ma, Yuan and Cheung, Yiu-ming and Malin, Bradley A.},
-	title = {Implementing Trust in Non-Small Cell Lung Cancer Diagnosis with a Conformalized Uncertainty-Aware AI Framework in Whole-Slide Images},
-	elocation-id = {2024.12.27.24319715},
-	year = {2024},
-	doi = {10.1101/2024.12.27.24319715},
-	publisher = {Cold Spring Harbor Laboratory Press},
-	URL = {https://www.medrxiv.org/content/early/2024/12/30/2024.12.27.24319715},
-	eprint = {https://www.medrxiv.org/content/early/2024/12/30/2024.12.27.24319715.full.pdf},
-	journal = {medRxiv}
+@article{zhang2026implementing,
+  title={Implementing trust in non-small cell lung cancer diagnosis with a conformalized uncertainty-aware AI framework},
+  author={Zhang, Xiaoge and Wang, Tao and Yan, Chao and Najdawi, Fedaa and Zhou, Kai and Ma, Yuan and Cheung, Yiu-ming and Yeung, Maximus CF and Malin, Bradley A},
+  journal={Nature Biomedical Engineering},
+  pages={1--18},
+  year={2026},
+  publisher={Nature Publishing Group UK London}
 }
 ```
 
